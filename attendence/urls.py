@@ -19,5 +19,6 @@ from django.urls import path,include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # path('shift/',include('shiftSetting.urls')),
+    path('shifts/',include('shiftSetting.urls')),
+    path('attendence/',include('attendenceSettings.urls')),
 ]

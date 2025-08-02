@@ -36,7 +36,8 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    'django.contrib.staticfiles','shiftSetting'
+    'django.contrib.staticfiles','shiftSetting','rest_framework',
+    'rest_framework.authtoken','attendenceSettings',
 ]
 
 MIDDLEWARE = [
