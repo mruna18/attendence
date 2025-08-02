@@ -19,6 +19,9 @@ class Shift(models.Model):
     is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True,blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True,blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.shift_head.name} (ID: {self.id})"
   
 
 class SubShift(models.Model):
