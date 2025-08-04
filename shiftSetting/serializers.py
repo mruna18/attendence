@@ -1,11 +1,5 @@
 from rest_framework import serializers
 from .models import *
-
-class ShiftHeadTypeSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ShiftHeadType
-        fields = '__all__'
-
 class SubShiftSerializer(serializers.ModelSerializer):
     # Format time fields in HH:MM format
     time_start = serializers.TimeField(format="%H:%M", input_formats=["%H:%M", "%H:%M:%S"])

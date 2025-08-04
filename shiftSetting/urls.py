@@ -3,13 +3,6 @@ from .views import *
 
 urlpatterns = [
 
-    # Shift Head Types
-    path('list-shift-head-types/', ShiftHeadTypeListView.as_view()),
-    path('create-shift-head-types/', ShiftHeadTypeCreateView.as_view()),
-    path('get-shift-head-types/<int:pk>/', ShiftHeadTypeRetrieveView.as_view()),
-    path('put-shift-head-types/<int:pk>/', ShiftHeadTypeUpdateView.as_view()),
-    path('delete-shift-head-types/<int:pk>', ShiftHeadTypeDeleteView.as_view()),
-
     # Shifts
     path('list-shifts/', ShiftListView.as_view()),
     path('create-shifts/', ShiftCreateView.as_view()),
