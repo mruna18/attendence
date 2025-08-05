@@ -15,6 +15,13 @@ urlpatterns = [
     path('approve-leave-request/<int:pk>/', LeaveApprovalView.as_view()),     
     path('cancel-leave-request/<int:pk>/', LeaveCancellationView.as_view()),     
     
+    #leave allocation
+    path('leave-allocation/', LeaveAllocationListView.as_view(), name='leave-allocation'),
+    path('create-leave-allocation/', LeaveAllocationCreateView.as_view(), name='create-leave-allocation'),
+    path('get-leave-allocation/<int:pk>/', LeaveAllocationRetrieveView.as_view(), name='get-leave-allocation'),
+    path('put-leave-allocation/<int:pk>/', LeaveAllocationUpdateView.as_view(), name='put-leave-allocation'),
+    path('delete-leave-allocation/<int:pk>/', LeaveAllocationDeleteView.as_view(), name='delete-leave-allocation'),
+    
     #leave balance
     path('leave-balance/', LeaveBalanceListView.as_view(), name='leave-balance'),
     path('create-leave-balance/', LeaveBalanceCreateView.as_view(), name='create-leave-balance'),
@@ -22,6 +29,16 @@ urlpatterns = [
     path('put-leave-balance/<int:pk>/', LeaveBalanceUpdateView.as_view(), name='put-leave-balance'),
     path('delete-leave-balance/<int:pk>/', LeaveBalanceDeleteView.as_view(), name='delete-leave-balance'),
     path('adjust-leave-balance/', LeaveBalanceAdjustmentView.as_view(), name='adjust-leave-balance'),
+
+    #leave settings
+    path('create-leave-settings/', LeaveSettingCreateView.as_view(), name='create-leave-settings'),
+    
+    #status management
+    path('list-status/', StatusListView.as_view(), name='list-status'),
+    path('create-status/', StatusCreateView.as_view(), name='create-status'),
+    path('get-status/<int:pk>/', StatusRetrieveView.as_view(), name='get-status'),
+    path('put-status/<int:pk>/', StatusUpdateView.as_view(), name='put-status'),
+    path('delete-status/<int:pk>/', StatusDeleteView.as_view(), name='delete-status'),
 
   
     #atttendance types
@@ -43,6 +60,13 @@ urlpatterns = [
     # Unified attendance punch - More scalable
     path('attendance-punch/', AttendancePunchView.as_view()),                
     
+    #status management
+    path('list-status/', StatusListView.as_view(), name='list-status'),
+    path('create-status/', StatusCreateView.as_view(), name='create-status'),
+    path('get-status/<int:pk>/', StatusRetrieveView.as_view(), name='get-status'),
+    path('put-status/<int:pk>/', StatusUpdateView.as_view(), name='put-status'),
+    path('delete-status/<int:pk>/', StatusDeleteView.as_view(), name='delete-status'),
+
   
     # ADDITIONAL UTILITY ENDPOINTS
   

@@ -1,378 +1,341 @@
 from datetime import datetime, timedelta
 from django.utils import timezone
 from django.db import transaction
-from .models import *
-from .utils import *
+from .models import Action, AttendanceType, Source, Attendance
 
 
 # Business Logic Services
 class AttendanceService:
-    """Service class for attendance business logic"""
+    """Service class for attendance business logic - Check In and Check Out only"""
     
     @staticmethod
-    def process_check_in(employee_id, action_type, today, now_time, present_type, source_id=None, remarks=""):
-        """Process check-in business logic"""
+    @transaction.atomic
+    def process_attendance_punch(employee_id, action_type_id, source_id=None, remarks="", custom_timestamp=None):
+        """Simplified attendance punch service for check-in and check-out only with shift integration"""
         try:
-            # Step 1: Get or create attendance
-            attendance, created = get_or_create_attendance(employee_id, today, present_type)
+            # Use custom timestamp if provided, otherwise use current time
+            if custom_timestamp:
+                now_time = custom_timestamp
+                today = now_time.date()
+            else:
+                today = timezone.localdate()
+                now_time = timezone.localtime()
             
-            # Step 2: Check if already checked in
-            if attendance.date_check_in:
-                return format_error_response("Already checked in. Please check out first.")
-            
-            # Step 3: Fetch and assign active shift based on check-in time
+            # Get attendance types
             try:
-                shift, sub_shift = get_shift_by_time(employee_id, now_time)
-                if shift:
-                    attendance.shift = shift
-                if sub_shift:
-                    attendance.sub_shift = sub_shift
-            except Exception as shift_error:
-                # If shift assignment fails, continue without shift
-                pass
+                present_type = AttendanceType.objects.get(code="P", deleted=False)
+                late_type = AttendanceType.objects.get(code="L", deleted=False)
+            except AttendanceType.DoesNotExist:
+                return {"error": "Required attendance types (P or L) not found", "status": "400"}
             
-            # Step 4: Update attendance record
-            attendance.action_type = action_type
-            attendance.date_check_in = now_time
-            if not attendance.attendance_type:
-                attendance.attendance_type = present_type
+            # Get Action object by ID
+            try:
+                action = Action.objects.get(id=action_type_id, deleted=False)
+            except Action.DoesNotExist:
+                return {"error": f"Action with ID {action_type_id} not found", "status": "400"}
             
-            # Step 4.1: Assign source and remarks if provided
+            # Get source if provided
+            source = None
             if source_id:
                 try:
                     source = Source.objects.get(id=source_id, deleted=False)
-                    attendance.source = source
                 except Source.DoesNotExist:
-                    # If source not found, continue without source
-                    pass
+                    return {"error": f"Source with ID {source_id} not found", "status": "400"}
             
-            if remarks:
-                attendance.remarks = remarks
+            # Process check-in
+            if action.code == "check_in":
+                # Check if employee is already checked in today
+                existing_attendance = Attendance.objects.filter(
+                    employee=employee_id,
+                    date_check_in__date=today,
+                    deleted=False
+                ).first()
+                
+                if existing_attendance:
+                    return {"error": "Employee is already checked in today", "status": "400"}
+                
+                # Get employee's shift and sub-shift
+                from .utils import get_shift_by_time, validate_check_in_time
+                shift, sub_shift = get_shift_by_time(employee_id, now_time)
+                
+                # Validate check-in time against shift
+                is_valid_check_in = True
+                check_in_message = ""
+                minutes_early = 0
+                
+                if shift and sub_shift:
+                    is_valid_check_in, check_in_message, minutes_early = validate_check_in_time(
+                        sub_shift, now_time, allow_early_check_in=True, early_buffer_minutes=30
+                    )
+                    
+                    if not is_valid_check_in:
+                        return {"error": check_in_message, "status": "400"}
+                
+                # Calculate late minutes if shift exists
+                late_minutes = 0
+                is_late = False
+                if shift and sub_shift:
+                    from .utils import calculate_late_minutes
+                    late_minutes = calculate_late_minutes(
+                        type('obj', (object,), {'sub_shift': sub_shift})(), 
+                        now_time,
+                        grace_period_minutes=15
+                    )
+                    is_late = late_minutes > 0
+                    
+                    
+                
+                # Determine attendance type based on late status
+                attendance_type = late_type if is_late else present_type
+                
+                # Create check-in record
+                try:
+                    attendance = Attendance.objects.create(
+                        employee=employee_id,
+                        attendance_type=attendance_type,
+                        action=action,
+                        date_check_in=now_time,
+                        source=source,
+                        remarks=remarks,
+                        shift=shift,
+                        sub_shift=sub_shift,
+                        is_late=is_late,
+                        late_by_minutes=late_minutes if is_late else None,
+                        deleted=False
+                    )
+                except Exception as create_error:
+                    return {"error": f"Error creating attendance record: {str(create_error)}", "status": "400"}
+                
+                response_data = {
+                    "message": "Check-in successful",
+                    "employee": employee_id,
+                    "check_in_time": now_time,
+                    "attendance_id": attendance.id,
+                    "status": "checked_in",
+                    "attendance_type": {
+                        "id": attendance_type.id,
+                        "code": attendance_type.code,
+                        "title": attendance_type.title
+                    }
+                }
+                
+                # Add remarks if provided
+                if remarks:
+                    response_data["remarks"] = remarks
+                
+                # Add shift information to response
+                if shift:
+                    response_data["shift"] = {
+                        "id": shift.id,
+                        "name": shift.shift_head,
+                        "description": shift.description
+                    }
+                if sub_shift:
+                    response_data["sub_shift"] = {
+                        "id": sub_shift.id,
+                        "title": sub_shift.title,
+                        "time_start": sub_shift.time_start.strftime("%H:%M") if sub_shift.time_start else None,
+                        "time_end": sub_shift.time_end.strftime("%H:%M") if sub_shift.time_end else None
+                    }
+                if is_late:
+                    response_data["late_minutes"] = late_minutes
+                    response_data["is_late"] = True
+                elif minutes_early > 0:
+                    response_data["minutes_early"] = minutes_early
+                    response_data["is_early_check_in"] = True
+                
+                return response_data
             
-            # Step 5: Calculate late minutes (with error handling)
-            try:
-                attendance.late_by_minutes = calculate_late_minutes(attendance, now_time)
-            except Exception as late_error:
-                # If late calculation fails, set to 0 and continue
-                attendance.late_by_minutes = 0
-            
-            # Step 6: Save attendance
-            attendance.save()
-            
-            return format_punch_response(
-                "Check-in successful",
-                action_type,
-                action_type,
-                "date_check_in",
-                attendance.date_check_in
-            )
-        except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
-            return format_error_response(f"Error during check-in: {str(e)}\nDetails: {error_details}")
-    
-    @staticmethod
-    def process_check_out(employee_id, action_type, today, now_time, present_type, source_id=None, remarks=""):
-        # """Process check-out business logic"""
-        # from datetime import datetime, time
-
-        try:
-            # Step 1: Define start and end of day
-            start_of_day = datetime.combine(today, time.min)
-            end_of_day = datetime.combine(today, time.max)
-
-            # Step 2: Get existing attendance (handle multiple records)
-            try:
-                # Get the most recent attendance record for today that hasn't been checked out
+            # Process check-out
+            elif action.code == "check_out":
+                # Find today's check-in record
                 attendance = Attendance.objects.filter(
                     employee=employee_id,
-                    date_check_in__range=(start_of_day, end_of_day),
-                    date_check_out__isnull=True,  # Only get records that haven't been checked out
+                    date_check_in__date=today,
+                    date_check_out__isnull=True,
                     deleted=False
-                ).order_by('-date_check_in').first()  # Get the most recent one
+                ).first()
                 
                 if not attendance:
-                    return format_error_response("No active attendance found for today")
-            except Exception as e:
-                return format_error_response(f"Error finding attendance: {str(e)}")
-
-            # Step 3: Validate check-in exists
-            if not attendance.date_check_in:
-                return format_error_response("No check-in found for today")
-
-            # Step 4: Check if already checked out
-            if attendance.date_check_out:
-                return format_error_response("Already checked out for today")
-
-            # Step 5: Update attendance record
-            attendance.action_type = action_type
-            attendance.date_check_out = now_time
-            if not attendance.attendance_type:
-                attendance.attendance_type = present_type
-            
-            # Step 5.1: Assign source and remarks if provided
-            if source_id:
+                    return {"error": "No check-in record found for today", "status": "400"}
+                
+                # Validate check-out time against shift
+                is_valid_check_out = True
+                check_out_message = ""
+                early_exit_minutes = 0
+                overtime_minutes = 0
+                
+                if attendance.sub_shift:
+                    from .utils import validate_check_out_time
+                    is_valid_check_out, check_out_message, early_exit_minutes, overtime_minutes = validate_check_out_time(
+                        attendance.sub_shift, now_time, attendance.date_check_in
+                    )
+                    
+                    if not is_valid_check_out:
+                        return {"error": check_out_message, "status": "400"}
+                
+                # Update check-out time
                 try:
-                    source = Source.objects.get(id=source_id, deleted=False)
-                    attendance.source = source
-                except Source.DoesNotExist:
-                    # If source not found, continue without source
-                    pass
+                    attendance.date_check_out = now_time
+                    
+                    # Calculate working hours
+                    if attendance.date_check_in:
+                        time_diff = now_time - attendance.date_check_in
+                        working_hours = time_diff.total_seconds() / 3600  # Convert to hours
+                        attendance.working_hour = round(working_hours, 2)
+                    
+                    # Set overtime minutes
+                    attendance.overtime_minutes = overtime_minutes
+                    
+                    attendance.save()
+                except Exception as save_error:
+                    return {"error": f"Error updating attendance record: {str(save_error)}", "status": "400"}
+                
+                response_data = {
+                    "message": "Check-out successful",
+                    "employee": employee_id,
+                    "check_in_time": attendance.date_check_in,
+                    "check_out_time": now_time,
+                    "working_hours": attendance.working_hour,
+                    "attendance_id": attendance.id,
+                    "status": "checked_out",
+                    "attendance_type": {
+                        "id": attendance.attendance_type.id,
+                        "code": attendance.attendance_type.code,
+                        "title": attendance.attendance_type.title
+                    }
+                }
+                
+                # Add remarks if available
+                if attendance.remarks:
+                    response_data["remarks"] = attendance.remarks
+                
+                # Add shift information to response
+                if attendance.shift:
+                    response_data["shift"] = {
+                        "id": attendance.shift.id,
+                        "name": attendance.shift.shift_head,
+                        "description": attendance.shift.description
+                    }
+                if attendance.sub_shift:
+                    response_data["sub_shift"] = {
+                        "id": attendance.sub_shift.id,
+                        "title": attendance.sub_shift.title,
+                        "time_start": attendance.sub_shift.time_start.strftime("%H:%M") if attendance.sub_shift.time_start else None,
+                        "time_end": attendance.sub_shift.time_end.strftime("%H:%M") if attendance.sub_shift.time_end else None
+                    }
+                if attendance.is_late:
+                    response_data["late_minutes"] = attendance.late_by_minutes
+                    response_data["is_late"] = True
+                if early_exit_minutes > 0:
+                    response_data["early_exit_minutes"] = early_exit_minutes
+                    response_data["early_exit_hours"] = round(early_exit_minutes / 60, 2)
+                    response_data["is_early_exit"] = True
+                if overtime_minutes > 0:
+                    response_data["overtime_minutes"] = overtime_minutes
+                    response_data["overtime_hours"] = round(overtime_minutes / 60, 2)
+                    response_data["is_overtime"] = True
+                
+                return response_data
             
-            if remarks:
-                attendance.remarks = remarks
-            
-            # Step 5.1: Ensure shift is assigned (if not already assigned)
-            if not attendance.shift or not attendance.sub_shift:
-                try:
-                    shift, sub_shift = get_active_shift_for_employee(employee_id)
-                    if shift and not attendance.shift:
-                        attendance.shift = shift
-                    if sub_shift and not attendance.sub_shift:
-                        attendance.sub_shift = sub_shift
-                except Exception as shift_error:
-                    # If shift assignment fails, continue without shift
-                    pass
-
-            # Step 6: Calculate worked hours and overtime
-            try:
-                if attendance.date_check_in and attendance.date_check_out:
-                    time_diff = attendance.date_check_out - attendance.date_check_in
-                    attendance.working_hour = int(time_diff.total_seconds() //  60)# Convert to hours
-                    attendance.overtime_minutes = calculate_overtime_minutes(attendance, attendance.working_hour * 60)
-            except Exception:
-                attendance.working_hour = 0
-                attendance.overtime_minutes = 0
-
-            # Step 7: Save attendance
-            attendance.save()
-
-            return format_punch_response(
-                "Check-out successful",
-                action_type,
-                action_type,
-                "date_check_out",
-                attendance.date_check_out
-            )
+            else:
+                return {"error": "Invalid action type. Only check_in and check_out actions are supported", "status": "400"}
+                
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
-            return format_error_response(f"Error during check-out: {str(e)}\nDetails: {error_details}")
-
+            return {"error": f"Error processing attendance punch: {str(e)}", "details": error_details, "status": "500"}
     
     @staticmethod
-    def process_break_start(employee_id, action_type, today, now_time, source_id=None, remarks=""):
-        """Process break start business logic"""
+    def get_employee_attendance_status(employee_id):
+        """Get employee's current attendance status for today"""
         try:
-            # Get the most recent attendance record for today
+            today = timezone.localdate()
+            
+            # Get today's attendance record
             attendance = Attendance.objects.filter(
-                employee=employee_id, 
-                date_check_in__date=today, 
+                employee=employee_id,
+                date_check_in__date=today,
                 deleted=False
-            ).order_by('-date_check_in').first()
+            ).first()
             
             if not attendance:
-                return format_error_response("No attendance found for today")
+                return {
+                    "employee": employee_id,
+                    "status": "not_checked_in",
+                    "message": "Employee not checked in today"
+                }
+            
+            # Base response data
+            response_data = {
+                "employee": employee_id,
+                "check_in_time": attendance.date_check_in,
+                "attendance_type": {
+                    "id": attendance.attendance_type.id,
+                    "code": attendance.attendance_type.code,
+                    "title": attendance.attendance_type.title
+                }
+            }
+            
+            # Add remarks if available
+            if attendance.remarks:
+                response_data["remarks"] = attendance.remarks
+            
+            # Add shift information if available
+            if attendance.shift:
+                response_data["shift"] = {
+                    "id": attendance.shift.id,
+                    "name": attendance.shift.shift_head,
+                    "description": attendance.shift.description
+                }
+            if attendance.sub_shift:
+                response_data["sub_shift"] = {
+                    "id": attendance.sub_shift.id,
+                    "title": attendance.sub_shift.title,
+                    "time_start": attendance.sub_shift.time_start.strftime("%H:%M") if attendance.sub_shift.time_start else None,
+                    "time_end": attendance.sub_shift.time_end.strftime("%H:%M") if attendance.sub_shift.time_end else None
+                }
+            if attendance.is_late:
+                response_data["late_minutes"] = attendance.late_by_minutes
+                response_data["is_late"] = True
+            
+            # Check if checked out
+            if attendance.date_check_out:
+                response_data.update({
+                    "status": "checked_out",
+                    "check_out_time": attendance.date_check_out,
+                    "working_hours": attendance.working_hour,
+                    "message": "Employee checked out for the day"
+                })
+                
+                # Add overtime information
+                if attendance.overtime_minutes and attendance.overtime_minutes > 0:
+                    response_data["overtime_minutes"] = attendance.overtime_minutes
+                    response_data["overtime_hours"] = round(attendance.overtime_minutes / 60, 2)
+                    response_data["is_overtime"] = True
+                
+                # Calculate early exit if applicable
+                if attendance.sub_shift and attendance.sub_shift.time_end:
+                    from .utils import validate_check_out_time
+                    _, _, early_exit_minutes, _ = validate_check_out_time(
+                        attendance.sub_shift, attendance.date_check_out, attendance.date_check_in
+                    )
+                    if early_exit_minutes > 0:
+                        response_data["early_exit_minutes"] = early_exit_minutes
+                        response_data["early_exit_hours"] = round(early_exit_minutes / 60, 2)
+                        response_data["is_early_exit"] = True
+            else:
+                response_data.update({
+                    "status": "checked_in",
+                    "message": "Employee is currently checked in"
+                })
+            
+            return response_data
+                
         except Exception as e:
-            return format_error_response(f"Error finding attendance: {str(e)}")
-        
-        # Check if already on break
-        existing_break = Attendance.objects.filter(
-            employee=employee_id,
-            action_type=action_type,
-            date_check_in__date=today,
-            date_check_out__isnull=True,
-            deleted=False
-        ).exists()
-        
-        if existing_break:
-            return format_error_response(f"Already on {action_type.replace('_', ' ')}")
-        
-        # Create break record
-        break_data = {
-            'employee': employee_id,
-            'action_type': action_type,
-            'date_check_in': now_time,
-            'attendance_type': attendance.attendance_type
-        }
-        
-        # Add source if provided
-        if source_id:
-            try:
-                source = Source.objects.get(id=source_id, deleted=False)
-                break_data['source'] = source
-            except Source.DoesNotExist:
-                # If source not found, continue without source
-                pass
-        
-        # Add remarks if provided
-        if remarks:
-            break_data['remarks'] = remarks
-        
-        break_attendance = Attendance.objects.create(**break_data)
-        
-        return format_punch_response(
-            f"{action_type.replace('_', ' ').title()} started",
-            action_type,
-            action_type,
-            "break_start_time",
-            break_attendance.date_check_in
-        )
-    
-    @staticmethod
-    def process_break_end(employee_id, action_type, today, now_time, source_id=None, remarks=""):
-        """Process break end business logic"""
-        # Find open break
-        if action_type == "break_end":
-            open_break = Attendance.objects.filter(
-                employee=employee_id,
-                action_type="break_start",
-                date_check_in__date=today,
-                date_check_out__isnull=True,
-                deleted=False
-            ).last()
-        else:  # lunch_end
-            open_break = Attendance.objects.filter(
-                employee=employee_id,
-                action_type="lunch_start",
-                date_check_in__date=today,
-                date_check_out__isnull=True,
-                deleted=False
-            ).last()
-        
-        if not open_break:
-            return format_error_response(f"No open {action_type.replace('_', ' ')} found")
-        
-        # Close the break
-        open_break.date_check_out = now_time
-        open_break.save()
-        
-        # Calculate break duration
-        break_duration = calculate_break_duration(
-            open_break.date_check_in, now_time, today
-        )
-        
-        return {
-            "message": f"{action_type.replace('_', ' ').title()} ended",
-            "action_type": action_type,
-            "break_end_time": str(now_time),
-            "break_duration_minutes": break_duration
-        }
-    
-    @staticmethod
-    def process_half_day(employee_id, action_type, today, now_time, present_type, source_id=None, remarks=""):
-        """Process half-day business logic"""
-        attendance, _ = get_or_create_attendance(employee_id, today, present_type)
-        
-        # Update attendance record
-        attendance.action_type = action_type
-        attendance.date_check_in = now_time
-        
-        # Set attendance type to half day
-        half_day_type = validate_attendance_type_exists("H")
-        if half_day_type:
-            attendance.attendance_type = half_day_type
-        
-        # Assign source and remarks if provided
-        if source_id:
-            try:
-                source = Source.objects.get(id=source_id, deleted=False)
-                attendance.source = source
-            except Source.DoesNotExist:
-                # If source not found, continue without source
-                pass
-        
-        if remarks:
-            attendance.remarks = remarks
-        
-        attendance.save()
-        
-        return format_punch_response(
-            "Half day marked successfully",
-            action_type,
-            action_type,
-            "half_day_time",
-            attendance.date_check_in
-        )
-    
-    @staticmethod
-    def process_work_from_home(employee_id, action_type, today, now_time, present_type, source_id=None, remarks=""):
-        """Process work from home business logic"""
-        attendance, _ = get_or_create_attendance(employee_id, today, present_type)
-        
-        # Update attendance record
-        attendance.action_type = action_type
-        attendance.date_check_in = now_time
-        
-        # Set attendance type to WFH
-        wfh_type = validate_attendance_type_exists("WFH")
-        if wfh_type:
-            attendance.attendance_type = wfh_type
-        
-        # Assign source and remarks if provided
-        if source_id:
-            try:
-                source = Source.objects.get(id=source_id, deleted=False)
-                attendance.source = source
-            except Source.DoesNotExist:
-                # If source not found, continue without source
-                pass
-        
-        if remarks:
-            attendance.remarks = remarks
-        
-        attendance.save()
-        
-        return format_punch_response(
-            "Work from home marked successfully",
-            action_type,
-            action_type,
-            "wfh_time",
-            attendance.date_check_in
-        )
-    
-    @staticmethod
-    def process_generic_action(employee_id, action_type, today, now_time, source_id=None, remarks=""):
-        """Process generic action business logic"""
-        try:
-            attendance = Attendance.objects.get(
-                employee=employee_id, 
-                date_check_in__date=today, 
-                deleted=False
-            )
-        except Attendance.DoesNotExist:
-            return format_error_response("No attendance found for today")
-        
-        # Create generic action record
-        generic_data = {
-            'employee': employee_id,
-            'action_type': action_type,
-            'date_check_in': now_time,
-            'attendance_type': attendance.attendance_type
-        }
-        
-        # Add source if provided
-        if source_id:
-            try:
-                source = Source.objects.get(id=source_id, deleted=False)
-                generic_data['source'] = source
-            except Source.DoesNotExist:
-                # If source not found, continue without source
-                pass
-        
-        # Add remarks if provided
-        if remarks:
-            generic_data['remarks'] = remarks
-        
-        generic_attendance = Attendance.objects.create(**generic_data)
-        
-        return format_punch_response(
-            f"{action_type.replace('_', ' ').title()} successful",
-            action_type,
-            action_type,
-            "action_time",
-            generic_attendance.date_check_in
-        )
+            import traceback
+            error_details = traceback.format_exc()
+            return {"error": f"Error getting employee status: {str(e)}", "details": error_details, "status": "500"}
 
 
 class LeaveService:
@@ -382,7 +345,7 @@ class LeaveService:
     def create_leave_request(data):
         """Create a new leave request"""
         try:
-            attendance_type = AttendanceType.objects.get(id=data['attendance_type'].id, is_leave=True, deleted=False)
+            attendance_type = AttendanceType.objects.get(id=data['attendance_type'], is_leave=True, deleted=False)
         except AttendanceType.DoesNotExist:
             raise Exception("Selected attendance type is not a valid leave type.")
         
@@ -395,7 +358,7 @@ class LeaveService:
         # Check leave balance
         balance_check = LeaveService.check_leave_balance(
             data['employee'], 
-            data['attendance_type'].id, 
+            data['attendance_type'], 
             data['start_date'], 
             data['end_date']
         )
@@ -438,8 +401,8 @@ class LeaveService:
         
         # Update leave request
         leave_request.status = approved_status
-        leave_request.approved_by = approver_id
-        leave_request.approved_at = timezone.now()
+        leave_request.action_by = approver_id
+        leave_request.action_at = timezone.now()
         leave_request.approval_remarks = approval_remarks
         leave_request.save()
         
@@ -450,7 +413,7 @@ class LeaveService:
             "message": "Leave request approved successfully",
             "leave_request_id": leave_request.id,
             "approved_by": approver_id,
-            "approved_at": str(leave_request.approved_at)
+            "approved_at": str(leave_request.action_at)
         }
     
     @staticmethod
@@ -472,8 +435,8 @@ class LeaveService:
         
         # Update leave request
         leave_request.status = rejected_status
-        leave_request.approved_by = approver_id
-        leave_request.approved_at = timezone.now()
+        leave_request.action_by = approver_id
+        leave_request.action_at = timezone.now()
         leave_request.approval_remarks = approval_remarks
         leave_request.save()
         
@@ -481,7 +444,7 @@ class LeaveService:
             "message": "Leave request rejected successfully",
             "leave_request_id": leave_request.id,
             "rejected_by": approver_id,
-            "rejected_at": str(leave_request.approved_at)
+            "rejected_at": str(leave_request.action_at)
         }
     
     @staticmethod
@@ -609,84 +572,124 @@ class LeaveService:
         ).select_related('leave_type')
         
         return balances
-
-
-class AttendanceReportService:
-    """Service class for attendance reporting"""
     
-    @staticmethod
-    def get_employee_attendance_summary(employee_id, date):
-        """Get attendance summary for employee"""
-        return get_attendance_summary(employee_id, date)
+#     @staticmethod
+#     def update_leave_balance(employee_id, attendance_type_id, used_days, year=None):
+#         """Update leave balance after approval"""
+#         if year is None:
+#             year = timezone.now().year
+        
+#         try:
+#             leave_balance = LeaveBalance.objects.get(
+#                 employee=employee_id,
+#                 leave_type_id=attendance_type_id,
+#                 year=year,
+#                 deleted=False
+#             )
+#             leave_balance.used_days += used_days
+#             leave_balance.save()
+#         except LeaveBalance.DoesNotExist:
+#             # Create new balance record if doesn't exist
+#             attendance_type = AttendanceType.objects.get(id=attendance_type_id)
+#             LeaveBalance.objects.create(
+#                 employee=employee_id,
+#                 leave_type=attendance_type,
+#                 year=year,
+#                 total_days=0,
+#                 used_days=used_days
+#             )
     
-    @staticmethod
-    def get_employee_status(employee_id, date):
-        """Get current employee status (checked in/out)"""
-        if not employee_id:
-            return format_error_response("employee parameter is required")
+#     @staticmethod
+#     def get_employee_leave_balance(employee_id, year=None):
+#         """Get employee's leave balance for all leave types"""
+#         if year is None:
+#             year = timezone.now().year
         
-        result = get_attendance_summary(employee_id, date)
-        return result
+#         balances = LeaveBalance.objects.filter(
+#             employee=employee_id,
+#             year=year,
+#             deleted=False
+#         ).select_related('leave_type')
+        
+#         return balances
+
+
+# class AttendanceReportService:
+#     """Service class for attendance reporting"""
     
-    @staticmethod
-    def get_attendance_list(employee_id=None):
-        """Get attendance list with optional employee filtering"""
-        queryset = Attendance.objects.filter(deleted=False)
-        if employee_id:
-            queryset = queryset.filter(employee=employee_id)
-        return queryset.order_by('-date_check_in')
+#     @staticmethod
+#     def get_employee_attendance_summary(employee_id, date):
+#         """Get attendance summary for employee"""
+#         return get_attendance_summary(employee_id, date)
     
-    @staticmethod
-    def get_attendance_report(employee_id=None, start_date=None, end_date=None):
-        """Generate attendance report"""
-        queryset = Attendance.objects.filter(deleted=False)
+#     @staticmethod
+#     def get_employee_status(employee_id, date):
+#         """Get current employee status (checked in/out)"""
+#         if not employee_id:
+#             return format_error_response("employee parameter is required")
         
-        if employee_id:
-            queryset = queryset.filter(employee=employee_id)
-        
-        if start_date:
-            queryset = queryset.filter(date_check_in__date__gte=start_date)
-        
-        if end_date:
-            queryset = queryset.filter(date_check_in__date__lte=end_date)
-        
-        return queryset.order_by('-date_check_in')
+#         result = get_attendance_summary(employee_id, date)
+#         return result
     
-    @staticmethod
-    def auto_mark_absent_service(date=None):
-        """Auto-mark absent service"""
-        if date is None:
-            date = timezone.localdate()
-        auto_mark_absent(date)
+#     @staticmethod
+#     def get_attendance_list(employee_id=None):
+#         """Get attendance list with optional employee filtering"""
+#         queryset = Attendance.objects.filter(deleted=False)
+#         if employee_id:
+#             queryset = queryset.filter(employee=employee_id)
+#         return queryset.order_by('-date_check_in')
+    
+#     @staticmethod
+#     def get_attendance_report(employee_id=None, start_date=None, end_date=None):
+#         """Generate attendance report"""
+#         queryset = Attendance.objects.filter(deleted=False)
+        
+#         if employee_id:
+#             queryset = queryset.filter(employee=employee_id)
+        
+#         if start_date:
+#             queryset = queryset.filter(date_check_in__date__gte=start_date)
+        
+#         if end_date:
+#             queryset = queryset.filter(date_check_in__date__lte=end_date)
+        
+#         return queryset.order_by('-date_check_in')
+    
+#     @staticmethod
+#     def auto_mark_absent_service(date=None):
+#         """Auto-mark absent service"""
+#         if date is None:
+#             date = timezone.localdate()
+#         auto_mark_absent(date)
 
 
-# Legacy functions (kept for backward compatibility)
-def get_all_employee_ids():
-    """Get all employee IDs (legacy function)"""
-    return get_employee_ids()
+# # Legacy functions (kept for backward compatibility)
+# def get_all_employee_ids():
+#     """Get all employee IDs (legacy function)"""
+#     return get_employee_ids()
 
 
-def calculate_worked_minutes_legacy(attendance):
-    """Calculate worked minutes (legacy function)"""
-    return calculate_worked_minutes(attendance)
+# def calculate_worked_minutes_legacy(attendance):
+#     """Calculate worked minutes (legacy function)"""
+#     return calculate_worked_minutes(attendance)
 
 
-def auto_mark_absent_legacy():
-    """Auto-mark absent (legacy function)"""
-    auto_mark_absent()
+# def auto_mark_absent_legacy():
+#     """Auto-mark absent (legacy function)"""
+#     auto_mark_absent()
 
 
-def get_lop_days(employee_id, start_date, end_date):
-    """Get LOP days for employee in date range"""
-    lop_type = AttendanceType.objects.get(code='A')  # Or LOP type code
-    return Attendance.objects.filter(
-        employee=employee_id,
-        attendance_type=lop_type,
-        date_check_in__date__range=(start_date, end_date),
-        deleted=False
-    ).count()
+# def get_lop_days(employee_id, start_date, end_date):
+#     """Get LOP days for employee in date range"""
+#     lop_type = AttendanceType.objects.get(code='A')  # Or LOP type code
+#     return Attendance.objects.filter(
+#         employee=employee_id,
+#         attendance_type=lop_type,
+#         date_check_in__date__range=(start_date, end_date),
+#         deleted=False
+#     ).count()
 
 
-def calculate_lop_deduction(gross_salary, month_days, lop_days):
-    """Calculate LOP deduction from salary"""
-    return (gross_salary / month_days) * lop_days
+# def calculate_lop_deduction(gross_salary, month_days, lop_days):
+#     """Calculate LOP deduction from salary"""
+#     return (gross_salary / month_days) * lop_days

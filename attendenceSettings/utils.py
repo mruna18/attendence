@@ -14,12 +14,70 @@ def calculate_worked_minutes(attendance):
     return int(time_diff.total_seconds() / 60)
 
 
-def calculate_late_minutes(attendance, check_in_time):
-    """Calculate late minutes based on shift start time"""
+def calculate_working_hours(attendance):
+    """Calculate working hours from attendance record"""
+    if not attendance.date_check_in or not attendance.date_check_out:
+        return 0
+    
+    time_diff = attendance.date_check_out - attendance.date_check_in
+    working_hours = time_diff.total_seconds() / 3600  # Convert to hours
+    return round(working_hours, 2)
+
+
+def calculate_late_minutes(attendance, check_in_time, grace_period_minutes=15):
+    """Calculate late minutes based on shift start time with grace period"""
     try:
         # If no sub_shift or time_start, return 0
         if not attendance.sub_shift or not attendance.sub_shift.time_start:
             return 0
+        
+        # Get current date from check_in_time
+        if hasattr(check_in_time, 'date'):
+            current_date = check_in_time.date()
+        else:
+            current_date = timezone.localdate()
+        
+        # Convert check_in_time to datetime if it's a time object
+        if isinstance(check_in_time, time):
+            check_in_datetime = datetime.combine(current_date, check_in_time)
+        else:
+            check_in_datetime = check_in_time
+        
+        # Handle night shifts (where end time < start time)
+        shift_start_time = attendance.sub_shift.time_start
+        shift_end_time = attendance.sub_shift.time_end
+        
+        # For night shifts, we need to determine the correct date for shift start
+        # If shift end time is earlier than start time, it's a night shift
+        if shift_end_time and shift_start_time and shift_end_time < shift_start_time:
+            # This is a night shift (e.g., 18:00 to 02:00)
+            # For check-in, use the same date as check-in time
+            shift_start = datetime.combine(current_date, shift_start_time)
+        else:
+            # Regular day shift
+            shift_start = datetime.combine(current_date, shift_start_time)
+        
+        shift_start = timezone.make_aware(shift_start)
+        grace_period_end = shift_start + timedelta(minutes=grace_period_minutes)
+        
+        # Calculate late minutes (only if beyond grace period)
+        if check_in_datetime > grace_period_end:
+            late_minutes = int((check_in_datetime - grace_period_end).total_seconds() / 60)
+            return max(0, late_minutes)
+        return 0
+    except Exception as e:
+        # If any error occurs, return 0
+        return 0
+
+
+def validate_check_in_time(sub_shift, check_in_time, allow_early_check_in=True, early_buffer_minutes=30):
+    """
+    Validate if check-in time is within acceptable range for the sub-shift
+    Returns: (is_valid, message, minutes_early)
+    """
+    try:
+        if not sub_shift or not sub_shift.time_start:
+            return True, "No shift timing defined", 0
         
         # Get current date
         current_date = timezone.localdate()
@@ -31,14 +89,86 @@ def calculate_late_minutes(attendance, check_in_time):
             check_in_datetime = check_in_time
         
         # Create shift start datetime
-        shift_start = datetime.combine(current_date, attendance.sub_shift.time_start)
+        shift_start = datetime.combine(current_date, sub_shift.time_start)
         
-        # Calculate late minutes
-        late_minutes = int((check_in_datetime - shift_start).total_seconds() / 60)
-        return max(0, late_minutes)
+        # Calculate minutes early
+        minutes_early = int((shift_start - check_in_datetime).total_seconds() / 60)
+        
+        if not allow_early_check_in and minutes_early > 0:
+            return False, f"Check-in not allowed before shift start time ({sub_shift.time_start.strftime('%H:%M')})", minutes_early
+        
+        # Allow early check-in within buffer period
+        if minutes_early > early_buffer_minutes:
+            return False, f"Check-in too early. Shift starts at {sub_shift.time_start.strftime('%H:%M')}", minutes_early
+        
+        return True, "Check-in time is valid", minutes_early
+        
     except Exception as e:
-        # If any error occurs, return 0
-        return 0
+        return True, "Error validating check-in time", 0
+
+
+def validate_check_out_time(sub_shift, check_out_time, check_in_time):
+    """
+    Validate check-out time and calculate early exit/overtime
+    Returns: (is_valid, message, early_exit_minutes, overtime_minutes)
+    """
+    try:
+        if not sub_shift or not sub_shift.time_end:
+            return True, "No shift timing defined", 0, 0
+        
+        # Get current date
+        current_date = timezone.localdate()
+        
+        # Convert times to datetime
+        if isinstance(check_out_time, time):
+            check_out_datetime = datetime.combine(current_date, check_out_time)
+        else:
+            check_out_datetime = check_out_time
+        
+        if isinstance(check_in_time, time):
+            check_in_datetime = datetime.combine(current_date, check_in_time)
+        else:
+            check_in_datetime = check_in_time
+        
+        # Handle night shifts for check-out
+        shift_start_time = sub_shift.time_start
+        shift_end_time = sub_shift.time_end
+        
+        # For night shifts, check-out date might be the next day
+        if shift_end_time and shift_start_time and shift_end_time < shift_start_time:
+            # This is a night shift (e.g., 18:00 to 02:00)
+            # For check-out, use the next day if check-out time is earlier than start time
+            if check_out_datetime.time() < shift_start_time:
+                # Check-out is on the next day
+                shift_end = datetime.combine(current_date + timedelta(days=1), shift_end_time)
+            else:
+                # Check-out is on the same day
+                shift_end = datetime.combine(current_date, shift_end_time)
+        else:
+            # Regular day shift
+            shift_end = datetime.combine(current_date, sub_shift.time_end)
+        
+        # Calculate early exit and overtime
+        early_exit_minutes = 0
+        overtime_minutes = 0
+        
+        if check_out_datetime < shift_end:
+            early_exit_minutes = int((shift_end - check_out_datetime).total_seconds() / 60)
+        else:
+            overtime_minutes = int((check_out_datetime - shift_end).total_seconds() / 60)
+        
+        # Calculate total worked time
+        total_worked_minutes = int((check_out_datetime - check_in_datetime).total_seconds() / 60)
+        
+        # Validate minimum working hours (e.g., at least 4 hours)
+        min_working_hours = 4 * 60  # 4 hours in minutes
+        if total_worked_minutes < min_working_hours:
+            return False, f"Minimum working hours not met. Worked: {total_worked_minutes//60}h {total_worked_minutes%60}m, Required: 4h", early_exit_minutes, overtime_minutes
+        
+        return True, "Check-out time is valid", early_exit_minutes, overtime_minutes
+        
+    except Exception as e:
+        return True, "Error validating check-out time", 0, 0
 
 
 def calculate_overtime_minutes(attendance, total_worked_minutes):
@@ -322,6 +452,89 @@ def get_attendance_summary(employee_id, date):
             "attendance_type": "Unknown",
             "action_type": None
         }
+
+
+def get_employee_attendance_status(employee_id):
+    """Get employee's current attendance status for today"""
+    try:
+        today = timezone.localdate()
+        
+        # Get today's attendance record
+        attendance = Attendance.objects.filter(
+            employee=employee_id,
+            date_check_in__date=today,
+            deleted=False
+        ).first()
+        
+        if not attendance:
+            return {
+                "employee": employee_id,
+                "status": "not_checked_in",
+                "message": "Employee not checked in today"
+            }
+        
+        # Check if checked out
+        if attendance.date_check_out:
+            return {
+                "employee": employee_id,
+                "status": "checked_out",
+                "check_in_time": attendance.date_check_in,
+                "check_out_time": attendance.date_check_out,
+                "working_hours": attendance.working_hour,
+                "message": "Employee checked out for the day"
+            }
+        else:
+            return {
+                "employee": employee_id,
+                "status": "checked_in",
+                "check_in_time": attendance.date_check_in,
+                "message": "Employee is currently checked in"
+            }
+            
+    except Exception as e:
+        return format_error_response(f"Error getting employee status: {str(e)}")
+
+
+def validate_attendance_punch(employee_id, action_type):
+    """Validate attendance punch request"""
+    try:
+        today = timezone.localdate()
+        
+        if action_type == "check_in":
+            # Check if already checked in today
+            existing_attendance = Attendance.objects.filter(
+                employee=employee_id,
+                date_check_in__date=today,
+                deleted=False
+            ).first()
+            
+            if existing_attendance:
+                return False, "Employee is already checked in today"
+            
+            return True, "Valid check-in request"
+        
+        elif action_type == "check_out":
+            # Check if checked in today
+            attendance = Attendance.objects.filter(
+                employee=employee_id,
+                date_check_in__date=today,
+                date_check_out__isnull=True,
+                deleted=False
+            ).first()
+            
+            if not attendance:
+                return False, "No check-in record found for today"
+            
+            if attendance.date_check_out:
+                return False, "Employee is already checked out for today"
+            
+            return True, "Valid check-out request"
+        
+        else:
+            return False, "Invalid action type. Only 'check_in' and 'check_out' are supported"
+            
+    except Exception as e:
+        return False, f"Error validating attendance punch: {str(e)}"
 
 
 # Legacy functions for backward compatibility
