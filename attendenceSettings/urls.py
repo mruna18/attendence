@@ -32,6 +32,14 @@ urlpatterns = [
 
     #leave settings
     path('create-leave-settings/', LeaveSettingCreateView.as_view(), name='create-leave-settings'),
+
+    #leave details
+    path('leave-details/', LeaveDetailListView.as_view(), name='leave-details'),
+    path('create-leave-detail/', LeaveDetailCreateView.as_view(), name='create-leave-detail'),
+    path('get-leave-detail/<int:pk>/', LeaveDetailRetrieveView.as_view(), name='get-leave-detail'),
+    path('put-leave-detail/<int:pk>/', LeaveDetailUpdateView.as_view(), name='put-leave-detail'),
+    path('delete-leave-detail/<int:pk>/', LeaveDetailDeleteView.as_view(), name='delete-leave-detail'),
+    path('leave-detail-attendance-types/', LeaveDetailAttendanceTypesView.as_view(), name='leave-detail-attendance-types'),
     
     #status management
     path('list-status/', StatusListView.as_view(), name='list-status'),

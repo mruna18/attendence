@@ -318,8 +318,9 @@ class LeaveSetting(models.Model):
 
 
 class LeaveDetail(models.Model):
-    company = models.IntegerField(null=True, blank=True)   # FK to Company
-    leave_type = models.ForeignKey(LeaveType, on_delete=models.DO_NOTHING, null=True, blank=True)
+    company = models.ForeignKey('BusinessInfo', on_delete=models.DO_NOTHING, null=True)  # FK to Company
+    attendance_type = models.ForeignKey(AttendanceType, on_delete=models.DO_NOTHING, null=True, blank=True)
+    employee = models.IntegerField(null=True, blank=True)  # FK to Employee
     
     financial_year_start = models.DateField(null=True, blank=True)  # e.g., 2025-04-01
     financial_year_end = models.DateField(null=True, blank=True)    # e.g., 2026-03-31
@@ -331,4 +332,13 @@ class LeaveDetail(models.Model):
     deleted = models.BooleanField(default=False)
 
     class Meta:
-        unique_together = ('company', 'leave_type', 'financial_year_start')
+        unique_together = ('employee', 'company', 'attendance_type', 'financial_year_start')
+        db_table = 'leaveDetail'
+
+    def __str__(self):
+        try:
+            attendance_type_title = self.attendance_type.title if self.attendance_type else 'No Attendance Type'
+            fy_start = self.financial_year_start.year if self.financial_year_start else 'N/A'
+            return f"Employee {self.employee} - Company {self.company} - {attendance_type_title} - FY {fy_start} ({self.allotted_days} days)"
+        except Exception:
+            return f"Employee {self.employee} - Company {self.company} - Unknown Type - {self.allotted_days} days"

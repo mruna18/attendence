@@ -239,6 +239,78 @@ class LeaveBalanceAdjustmentView(APIView):
             return Response({"error": str(e), "status": "500"})
 
 
+# LEAVE DETAIL MANAGEMENT VIEWS
+
+class LeaveDetailListView(APIView):
+    """List all leave details"""
+    def get(self, request):
+        try:
+            leave_details = LeaveDetail.objects.filter(deleted=False)
+            serializer = LeaveDetailSerializer(leave_details, many=True)
+            return Response({"data": serializer.data, "status": "200"})
+        except Exception as e:
+            return Response({"error": str(e), "status": "500"})
+
+class LeaveDetailCreateView(APIView):
+    """Create a new leave detail"""
+    def post(self, request):
+        try:
+            with transaction.atomic():
+                serializer = LeaveDetailSerializer(data=request.data)
+                if serializer.is_valid():
+                    serializer.save()
+                    return Response({"data": serializer.data, "status": "200"})
+                return Response({"error": serializer.errors, "status": "500"})
+        except Exception as e:
+            return Response({"error": str(e), "status": "500"})
+
+class LeaveDetailRetrieveView(APIView):
+    """Get a specific leave detail by ID"""
+    def get(self, request, pk):
+        try:
+            obj = LeaveDetail.objects.get(pk=pk, deleted=False)
+            serializer = LeaveDetailSerializer(obj)
+            return Response({"data": serializer.data, "status": "200"})
+        except LeaveDetail.DoesNotExist:
+            return Response({"error": "Leave detail not found", "status": "500"})
+
+class LeaveDetailUpdateView(APIView):
+    """Update a leave detail"""
+    def put(self, request, pk):
+        try:
+            with transaction.atomic():
+                obj = LeaveDetail.objects.get(pk=pk, deleted=False)
+                serializer = LeaveDetailSerializer(obj, data=request.data)
+                if serializer.is_valid():
+                    serializer.save()
+                    return Response({"data": serializer.data, "status": "200"})
+                return Response({"error": serializer.errors, "status": "500"})
+        except LeaveDetail.DoesNotExist:
+            return Response({"error": "Leave detail not found", "status": "500"})
+
+class LeaveDetailDeleteView(APIView):
+    """Soft delete a leave detail"""
+    def delete(self, request, pk):
+        try:
+            with transaction.atomic():
+                obj = LeaveDetail.objects.get(pk=pk, deleted=False)
+                obj.deleted = True
+                obj.save()
+                return Response({"data": "Leave detail deleted successfully", "status": "200"})
+        except LeaveDetail.DoesNotExist:
+            return Response({"error": "Leave detail not found", "status": "500"})
+
+class LeaveDetailAttendanceTypesView(APIView):
+    """Get available attendance types for leave details (where is_leave=True)"""
+    def get(self, request):
+        try:
+            attendance_types = AttendanceType.objects.filter(is_leave=True, deleted=False)
+            serializer = AttendanceTypeSerializer(attendance_types, many=True)
+            return Response({"data": serializer.data, "status": "200"})
+        except Exception as e:
+            return Response({"error": str(e), "status": "500"})
+
+
 # LEAVE BALANCE MAPPING MANAGEMENT VIEWS
 
 class LeaveSettingCreateView(APIView):

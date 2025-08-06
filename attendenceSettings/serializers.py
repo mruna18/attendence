@@ -118,4 +118,31 @@ class LeaveAllocationSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeaveAllocation
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']        
+        read_only_fields = ['created_at', 'updated_at']
+
+
+class LeaveDetailSerializer(serializers.ModelSerializer):
+    attendance_type_title = serializers.CharField(source='attendance_type.title', read_only=True)
+    company_name = serializers.CharField(source='company.name', read_only=True)
+    
+    class Meta:
+        model = LeaveDetail
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Filter attendance_type to only show those where is_leave=True
+        self.fields['attendance_type'].queryset = AttendanceType.objects.filter(
+            is_leave=True, 
+            deleted=False
+        )
+
+    def validate_attendance_type(self, value):
+        """Validate that the selected attendance_type has is_leave=True"""
+        if value and not value.is_leave:
+            raise serializers.ValidationError(
+                "Selected attendance type must be a leave type (is_leave=True)"
+            )
+        return value
+     
